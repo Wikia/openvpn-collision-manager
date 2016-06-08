@@ -20,18 +20,38 @@ const (
 )
 
 var (
-	openvpnStatusFile = kingpin.Flag("status-file", "openvpn status file path").Default("/etc/openvpn/openvpn-status.log").Short('s').String()
+	openvpnStatusFileList = StatusFileList(kingpin.Arg("openvpn status files", "openvpn status file list"))
 	openvpnProto = kingpin.Flag("openvpn-proto", "openvpn tunnel protocol").Default("tcp-udp").Short('p').String()
 	openvpnPort = kingpin.Flag("openvpn-port", "openvpn tunnel port").Default("1194").Short('r').String()
 	bindPort = kingpin.Flag("bind-port", "port to bind daemon to").Default("8888").Short('t').String()
 	bindAddr = kingpin.Flag("bind-addr", "address to bind daemon to").Default("127.0.0.1").Short('a').String()
 )
 
-type BlockIp struct {
-    Username string `json:"username" binding:"required"`
-    Ip string `json:"ip" binding:"required"`
+type statusFileList []string
+
+func (i *statusFileList) Set(value string) error {
+	*i = append(*i, value)
+	return nil
 }
 
+func (i *statusFileList) String() string {
+	return ""
+}
+
+func (i *statusFileList	) IsCumulative() bool {
+	return true
+}
+
+func StatusFileList(s kingpin.Settings) (target *[]string) {
+	target = new([]string)
+	s.SetValue((*statusFileList)(target))
+	return
+}
+
+type BlockIp struct {
+	Username string `json:"username" binding:"required"`
+	Ip string `json:"ip" binding:"required"`
+}
 
 func getOpenvpnStatus(filename string) (map[string]map[string]string, error) {
 	openvpnStatus := make(map[string]map[string]string)
@@ -61,6 +81,7 @@ func getOpenvpnStatus(filename string) (map[string]map[string]string, error) {
 				"bytes_recv": user[2],
 				"bytes_sent": user[3],
 				"connected_since": user[4],
+				"source_status_file": filename,
 			}
 		}
 	}
@@ -196,22 +217,32 @@ func deleteIptablesRule(ip, username, proto string) bool {
 
 func executeShell(cmdName string, cmdArgs []string) error {
 	if err := exec.Command(cmdName, cmdArgs...).Run(); err == nil {
-		log.Infof("Executing shell command success: %s %s", cmdName, strings.Join(cmdArgs, " "))
+		log.Debugf("Executing shell command success: %s %s", cmdName, strings.Join(cmdArgs, " "))
 		return nil
 	} else {
-		log.Infof("Executing shell command failed: %s %s: %s", cmdName, strings.Join(cmdArgs, " "), err)
+		log.Debugf("Executing shell command failed: %s %s: %s", cmdName, strings.Join(cmdArgs, " "), err)
 		return errors.New(fmt.Sprintf("Cannot execute shell command: %s %s: %s", cmdName, strings.Join(cmdArgs, " "), err))
 	}
 }
 
 func getUserData(c *gin.Context) {
 	username := c.Param("username")
+
+	log.Infof("Getting data for user %s", username)
+
 	result := make(gin.H)
 
-	ovpnStatus, err := getOpenvpnStatus(*openvpnStatusFile)
-	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("%v", err)})
-		return
+	ovpnStatus := make(map[string]map[string]string)
+	for _, statusFile := range *openvpnStatusFileList {
+		status, err := getOpenvpnStatus(statusFile)
+		if err == nil {
+			for k, v := range status {
+				ovpnStatus[k] = v
+			}
+		} else {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("cannot get data from openvpn status file %s: %s", statusFile, err)})
+			return
+		}
 	}
 
 	if value, ok := ovpnStatus[username]; ok {
@@ -222,6 +253,7 @@ func getUserData(c *gin.Context) {
 		result["bytes_recv"] = value["bytes_recv"]
 		result["bytes_sent"] = value["bytes_sent"]
 		result["connected_since"] = value["connected_since"]
+		result["source_status_file"] = value["source_status_file"]
 	} else {
 		result["username"] = username
 		result["status"] = "disconnected"
@@ -244,23 +276,27 @@ func getUserData(c *gin.Context) {
 func blockIp(c *gin.Context) {
 	var json BlockIp
 	var username, ip string
+
 	if c.BindJSON(&json) == nil {
 		username = json.Username
 		ip = json.Ip
 	}
 
 	if username == "" || ip == "" {
-		c.JSON(500, gin.H{"status": "cannot get username and ip"})
+		c.JSON(500, gin.H{"error": "username or ip empty"})
 		return
 	}
 
+	log.Infof("Blocking IP %s for %s", ip, username)
+
 	iptablesData, err := getIptablesData()
 	if err != nil {
-		c.JSON(500, gin.H{"status": "cannot get iptables data"})
+		c.JSON(500, gin.H{"error": "cannot get iptables data"})
 		return
 	}
 	
 	if stringInMapValue(ip, iptablesData[username]) {
+		log.Infof("IP %s already blocked for %s", ip, username)
 		c.JSON(200, gin.H{"status": "ok"})
 		return
 	}
@@ -271,6 +307,7 @@ func blockIp(c *gin.Context) {
 		for _, proto := range []string{"tcp", "udp"} {
 			err = addIptablesRule(ip, username, proto)
 			if err != nil {
+				log.Warningf("Cannot add iptables rule with IP %s, protocol %s for user %s", ip, proto, username)
 				fail = true
 			}
 		}
@@ -281,6 +318,8 @@ func blockIp(c *gin.Context) {
 		err = addIptablesRule(ip, username, *openvpnProto)
 		if err == nil {
 			success = true
+		} else {
+			log.Warningf("Cannot add iptables rule with IP %s, protocol %s for user %s", ip, *openvpnProto, username)
 		}
 	}
 
@@ -300,15 +339,18 @@ func unblockIp (c *gin.Context) {
 	}
 
 	if username == "" || ip == "" {
-		c.JSON(500, gin.H{"status": "cannot get username and ip"})
+		c.JSON(500, gin.H{"error": "username or ip empty"})
 		return
 	}
+
+	log.Infof("Unblocking IP %s for %s", ip, username)
 
 	var success bool = false
 	if *openvpnProto == "tcp-udp" {
 		var fail bool = false
 		for _, proto := range []string{"tcp", "udp"} {
 			if !deleteIptablesRule(ip, username, proto) {
+				log.Warningf("Cannot delete iptables rule with IP %s, protocol %s for user %s", ip, proto, username)
 				fail = true
 			}
 		}
@@ -318,6 +360,8 @@ func unblockIp (c *gin.Context) {
 	} else if *openvpnProto == "tcp" || *openvpnProto == "udp" {
 		if deleteIptablesRule(ip, username, *openvpnProto) {
 			success = true
+		} else {
+			log.Warningf("Cannot delete iptables rule with IP %s, protocol %s for user %s", ip, *openvpnProto, username)
 		}
 	}
 
