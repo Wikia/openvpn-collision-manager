@@ -376,11 +376,11 @@ func main() {
 	kingpin.Parse()
 
 	if *openvpnProto != "tcp-udp" && *openvpnProto != "tcp" && *openvpnProto != "udp" {
-		panic("error: possible protocol variants: tcp, udp, tcp-udp")
+		kingpin.FatalUsage("possible protocol variants: tcp, udp, tcp-udp")
 	}
 
 	if len(*openvpnStatusFileList) == 0 {
-		panic("error: no openvpn status file provided")
+		kingpin.FatalUsage("no openvpn status file provided")
 	}
 
 	f, err := os.OpenFile(logFile, os.O_APPEND | os.O_CREATE | os.O_WRONLY, 0644)
