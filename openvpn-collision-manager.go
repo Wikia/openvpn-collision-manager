@@ -379,6 +379,10 @@ func main() {
 		panic("error: possible protocol variants: tcp, udp, tcp-udp")
 	}
 
+	if len(*openvpnStatusFileList) == 0 {
+		panic("error: no openvpn status file provided")
+	}
+
 	f, err := os.OpenFile(logFile, os.O_APPEND | os.O_CREATE | os.O_WRONLY, 0644)
 	if err != nil {
 	    panic(err)
