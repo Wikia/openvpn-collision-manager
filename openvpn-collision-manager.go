@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	logFile string = "/var/log/openvpn-collision-manager.log"
+	ver string = "0.20"
 )
 
 var (
@@ -25,6 +25,7 @@ var (
 	openvpnPort = kingpin.Flag("openvpn-port", "openvpn tunnel port").Default("1194").Short('r').String()
 	bindPort = kingpin.Flag("bind-port", "port to bind daemon to").Default("8888").Short('t').String()
 	bindAddr = kingpin.Flag("bind-addr", "address to bind daemon to").Default("127.0.0.1").Short('a').String()
+	logFile = kingpin.Flag("log-file", "log file").Default("/var/log/openvpn-collision-manager.log").Short('l').String()
 )
 
 type statusFileList []string
@@ -373,6 +374,7 @@ func unblockIp (c *gin.Context) {
 }
 
 func main() {
+	kingpin.Version(ver)
 	kingpin.Parse()
 
 	if *openvpnProto != "tcp-udp" && *openvpnProto != "tcp" && *openvpnProto != "udp" {
@@ -383,7 +385,7 @@ func main() {
 		kingpin.FatalUsage("no openvpn status file provided")
 	}
 
-	f, err := os.OpenFile(logFile, os.O_APPEND | os.O_CREATE | os.O_WRONLY, 0644)
+	f, err := os.OpenFile(*logFile, os.O_APPEND | os.O_CREATE | os.O_WRONLY, 0644)
 	if err != nil {
 	    panic(err)
 	}
