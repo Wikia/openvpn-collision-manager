@@ -1,31 +1,31 @@
 package main
 
 import (
-	"fmt"
-	"strings"
 	"bufio"
-	"os"
 	"errors"
+	"fmt"
+	"net"
+	"os"
 	"os/exec"
 	"regexp"
-	"net"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/alecthomas/kingpin.v2"
-	log "github.com/Sirupsen/logrus"
 )
 
 const (
-	ver string = "0.20"
+	ver string = "0.21"
 )
 
 var (
 	openvpnStatusFileList = StatusFileList(kingpin.Arg("openvpn status files", "openvpn status file list"))
-	openvpnProto = kingpin.Flag("openvpn-proto", "openvpn tunnel protocol").Default("tcp-udp").Short('p').String()
-	openvpnPort = kingpin.Flag("openvpn-port", "openvpn tunnel port").Default("1194").Short('r').String()
-	bindPort = kingpin.Flag("bind-port", "port to bind daemon to").Default("8888").Short('t').String()
-	bindAddr = kingpin.Flag("bind-addr", "address to bind daemon to").Default("127.0.0.1").Short('a').String()
-	logFile = kingpin.Flag("log-file", "log file").Default("/var/log/openvpn-collision-manager.log").Short('l').String()
+	openvpnProto          = kingpin.Flag("openvpn-proto", "openvpn tunnel protocol").Default("tcp-udp").Short('p').String()
+	openvpnPort           = kingpin.Flag("openvpn-port", "openvpn tunnel port").Default("1194").Short('r').String()
+	bindPort              = kingpin.Flag("bind-port", "port to bind daemon to").Default("8888").Short('t').String()
+	bindAddr              = kingpin.Flag("bind-addr", "address to bind daemon to").Default("127.0.0.1").Short('a').String()
+	logFile               = kingpin.Flag("log-file", "log file").Default("/var/log/openvpn-collision-manager.log").Short('l').String()
 )
 
 type statusFileList []string
@@ -39,7 +39,7 @@ func (i *statusFileList) String() string {
 	return ""
 }
 
-func (i *statusFileList	) IsCumulative() bool {
+func (i *statusFileList) IsCumulative() bool {
 	return true
 }
 
@@ -51,66 +51,127 @@ func StatusFileList(s kingpin.Settings) (target *[]string) {
 
 type BlockIp struct {
 	Username string `json:"username" binding:"required"`
-	Ip string `json:"ip" binding:"required"`
+	Ip       string `json:"ip" binding:"required"`
 }
 
 func getOpenvpnStatus(filename string) (map[string]map[string]string, error) {
-	openvpnStatus := make(map[string]map[string]string)
-
-	file, err := os.Open(filename)
+	scanner, file, err := scanfile(filename)
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("Cannot open openvpn status file %s", filename))
+		return nil, err
 	}
 	defer file.Close()
+	v1, err := parsev1(scanner, filename)
+	if err != nil {
+		return nil, err
+	}
+
+	scanner, file, err = scanfile(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	v2, err := parsev2(scanner, filename)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(v1) > len(v2) {
+		return v1, nil
+	} else {
+		return v2, nil
+	}
+}
+
+func scanfile(filename string) (*bufio.Scanner, *os.File, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot open openvpn status file %s", filename)
+	}
 
 	scanner := bufio.NewScanner(file)
+	return scanner, file, nil
+}
+
+// parse the original v1 openvpn log format
+func parsev1(scanner *bufio.Scanner, filename string) (map[string]map[string]string, error) {
+	openvpnStatus := make(map[string]map[string]string)
+
 	for scanner.Scan() {
 		user := strings.Split(scanner.Text(), ",")
 		// parse only CLIENT LIST lines, not ROUTING TABLE
-		if len(user) == 5 {
+		// expecting 5 comma delimited values in the row
+		// also skip the header
+		if len(user) == 5 && user[1] != "Real Address" {
+			//log.Infof("FOUND %s", user)
 			var revdns string = ""
 			ip := strings.Split(user[1], ":")[0]
 
 			rev, err := net.LookupAddr(ip)
 			if err == nil {
 				revdns = rev[0]
-			} 
+			}
 			openvpnStatus[user[0]] = map[string]string{
-				"username": user[0],
-				"remote_ip": ip,
-				"remote_revdns": revdns,
-				"bytes_recv": user[2],
-				"bytes_sent": user[3],
-				"connected_since": user[4],
+				"username":           user[0],
+				"remote_ip":          ip,
+				"remote_revdns":      revdns,
+				"bytes_recv":         user[2],
+				"bytes_sent":         user[3],
+				"connected_since":    user[4],
 				"source_status_file": filename,
 			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, errors.New(fmt.Sprintf("Cannot parse openvpn status file %s", filename))
+		return nil, fmt.Errorf("cannot parse openvpn status file %s", filename)
 	}
 	return openvpnStatus, nil
 }
 
-func stringInSlice(a string, list []string) bool {
-    for _, b := range list {
-        if b == a {
-            return true
-        }
-    }
-    return false
+// parse the new v2 openvpn log format
+func parsev2(scanner *bufio.Scanner, filename string) (map[string]map[string]string, error) {
+	openvpnStatus := make(map[string]map[string]string)
+
+	for scanner.Scan() {
+		user := strings.Split(scanner.Text(), ",")
+		//log.Infof("XXXFOUND %s", user)
+		if user[0] == "CLIENT_LIST" {
+
+			var revdns string = ""
+			ip := strings.Split(user[2], ":")[0]
+
+			rev, err := net.LookupAddr(ip)
+			if err == nil {
+				revdns = rev[0]
+			}
+			openvpnStatus[user[1]] = map[string]string{
+				"username":           user[1],
+				"remote_ip":          ip,
+				"remote_revdns":      revdns,
+				"bytes_recv":         user[5],
+				"bytes_sent":         user[6],
+				"connected_since":    user[7],
+				"source_status_file": filename,
+			}
+
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("cannot parse openvpn status file %s", filename)
+	}
+	return openvpnStatus, nil
 }
 
 func stringInMapValue(a string, list []map[string]string) bool {
 	for _, item := range list {
-		for k, _ := range item {
+		for k := range item {
 			if k == a {
 				return true
 			}
 		}
 	}
-    return false
+	return false
 }
 
 func getIptablesData() (map[string][]map[string]string, error) {
@@ -118,7 +179,7 @@ func getIptablesData() (map[string][]map[string]string, error) {
 
 	cmd, err := exec.Command("iptables", "-nL", "INPUT").Output()
 	if err != nil {
-		return nil, errors.New("Cannot gather iptables output")
+		return nil, errors.New("cannot gather iptables output")
 	}
 
 	lines := strings.Split(string(cmd), "\n")
@@ -141,7 +202,7 @@ func getIptablesData() (map[string][]map[string]string, error) {
 				if err == nil {
 					a[value] = rev[0]
 				} else {
-					a[value] = ""				
+					a[value] = ""
 				}
 				iptablesDataMap[key] = append(iptablesDataMap[key], a)
 			}
@@ -222,7 +283,7 @@ func executeShell(cmdName string, cmdArgs []string) error {
 		return nil
 	} else {
 		log.Debugf("Executing shell command failed: %s %s: %s", cmdName, strings.Join(cmdArgs, " "), err)
-		return errors.New(fmt.Sprintf("Cannot execute shell command: %s %s: %s", cmdName, strings.Join(cmdArgs, " "), err))
+		return fmt.Errorf("cannot execute shell command: %s %s: %s", cmdName, strings.Join(cmdArgs, " "), err)
 	}
 }
 
@@ -295,7 +356,7 @@ func blockIp(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "cannot get iptables data"})
 		return
 	}
-	
+
 	if stringInMapValue(ip, iptablesData[username]) {
 		log.Infof("IP %s already blocked for %s", ip, username)
 		c.JSON(200, gin.H{"status": "ok"})
@@ -331,7 +392,7 @@ func blockIp(c *gin.Context) {
 	}
 }
 
-func unblockIp (c *gin.Context) {
+func unblockIp(c *gin.Context) {
 	var json BlockIp
 	var username, ip string
 	if c.BindJSON(&json) == nil {
@@ -385,9 +446,9 @@ func main() {
 		kingpin.FatalUsage("no openvpn status file provided")
 	}
 
-	f, err := os.OpenFile(*logFile, os.O_APPEND | os.O_CREATE | os.O_WRONLY, 0644)
+	f, err := os.OpenFile(*logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-	    panic(err)
+		panic(err)
 	}
 	defer f.Close()
 	log.SetOutput(f)
