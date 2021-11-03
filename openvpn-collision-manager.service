@@ -1,0 +1,14 @@
+[Unit]
+Description=openvpn collision manager
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Restart=on-failure
+PermissionsStartOnly=true
+ExecStart=/usr/local/sbin/openvpn-collision-manager /etc/openvpn/openvpn-status-tcp.log /etc/openvpn/openvpn-status-udp.log
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
