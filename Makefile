@@ -31,7 +31,7 @@ test:
 	curl -s localhost:8888/users/frank@fandom.com
 
 build:
-	GOOS=linux GOARCH=amd64 go build -ldflags="-s -w"
+	GOOS=linux GOARCH=amd64 go build -buildvcs=false -ldflags="-s -w"
 	# upx openvpn-collision-manager
 
 upload:
